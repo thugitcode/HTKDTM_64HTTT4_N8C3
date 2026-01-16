@@ -1,0 +1,10 @@
+streamlit
+opencv-python-headless
+numpy
+pandas
+gspread
+oauth2client
+plotly
+streamlit-webrtc
+python-dotenv
+mediapipe
