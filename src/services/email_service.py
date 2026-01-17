@@ -104,3 +104,47 @@ def send_graduation_email(receiver_email, student_name, course_name, final_score
         return True, "Đã gửi mail kèm chứng chỉ!"
     except Exception as e:
         return False, str(e)
+    
+    from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from datetime import datetime
+import io
+
+def generate_insight_pdf(user_name, score, chap, cheats):
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+
+    # 1. Trang trí tiêu đề
+    c.setFillColor(colors.darkblue)
+    c.setFont("Helvetica-Bold", 24)
+    c.drawCentredString(width/2, height - 50, "EBSIS LEARNING ANALYTICS REPORT")
+    
+    # 2. Thông tin học viên
+    c.setStrokeColor(colors.lightgrey)
+    c.line(50, height - 70, width - 50, height - 70)
+    
+    c.setFillColor(colors.black)
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(50, height - 100, f"Student Name: {user_name}")
+    c.drawString(50, height - 120, f"Report Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+
+    # 3. Chỉ số KPI
+    c.setFont("Helvetica", 12)
+    c.rect(50, height - 250, 500, 100)
+    c.drawString(70, height - 180, f"- Logic/IQ Score: {score}%")
+    c.drawString(70, height - 200, f"- Course Progress: {chap}/8 Chapters")
+    c.drawString(70, height - 220, f"- Integrity Index: {max(0, 100-(cheats*5))}% (AI Monitored)")
+
+    # 4. Nhận xét từ AI
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(50, height - 300, "AI Behavioral Insights:")
+    c.setFont("Helvetica-Oblique", 11)
+    text = f"The student shows strong focus in logic-based modules. Cheat count: {cheats}."
+    c.drawString(50, height - 320, text)
+
+    c.showPage()
+    c.save()
+    buffer.seek(0)
+    return buffer

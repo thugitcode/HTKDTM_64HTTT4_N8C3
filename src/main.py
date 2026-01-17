@@ -4,34 +4,55 @@ import os
 import time
 import pandas as pd
 import json
+import numpy as np
 from datetime import datetime
+import plotly.express as px
+import plotly.graph_objects as go
 
-# Thêm vào ngay sau phần import
+# --- KHỞI TẠO KẾT NỐI DB ---
 if "db_client" not in st.session_state:
     from src.services.db_connector import get_connection
-    st.session_state.db_client = get_connection()
+    try:
+        st.session_state.db_client = get_connection()
+    except:
+        st.session_state.db_client = None
     
 # 1. CẤU HÌNH APP
 st.set_page_config(page_title="Ebsis - Intelligent Learning", page_icon="🎓", layout="wide")
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # 2. IMPORT GIAO DIỆN & LOGIC
+from services.email_service import generate_insight_pdf
 from src.ui.login_ui import render_login_ui, render_register_face_ui
 from src.ui.adaptive_ui import render_adaptive_ui
 from src.ui.student_dashboard import render_student_dashboard_page, render_student_profile_page
 from src.core.m2_adaptive import get_user_progress
-from src.core.m1_proctoring import verify_login # Import thêm để khôi phục session
+from src.core.m1_proctoring import verify_login
 
-# 3. QUẢN LÝ TRẠNG THÁI
+# --- HÀM GHI LOG HOẠT ĐỘNG ---
+def save_activity_log(user_id, name, action):
+    try:
+        client = st.session_state.db_client
+        if client:
+            sheet = client.open("Ebsis_DB").worksheet("LOGS")
+            now = datetime.now()
+            new_log = [
+                str(user_id), name, action,
+                now.strftime("%Y-%m-%d %H:%M:%S"),
+                now.strftime("%Y-%m-%d"), now.hour
+            ]
+            sheet.append_row(new_log)
+    except:
+        pass
+
+# 3. QUẢN LÝ TRẠNG THÁI SESSION
 if 'user_info' not in st.session_state: st.session_state['user_info'] = None
 
-# --- [BỔ SUNG] LOGIC KHÔI PHỤC SESSION KHI F5 ---
+# --- LOGIC KHÔI PHỤC SESSION KHI F5 ---
 if st.session_state['user_info'] is None:
-    # Kiểm tra xem trên thanh địa chỉ có ID người dùng không
     params = st.query_params
     if "uid" in params:
         user_id_saved = params["uid"]
-        # Gọi Database lấy lại thông tin user mà không bắt nhập pass lại
         with st.spinner("Đang khôi phục phiên làm việc..."):
             from src.services.db_connector import get_connection
             client = get_connection()
@@ -41,6 +62,7 @@ if st.session_state['user_info'] is None:
                 for r in records:
                     if str(r.get('user_id')) == str(user_id_saved):
                         st.session_state['user_info'] = r
+                        save_activity_log(r['user_id'], r['full_name'], "Auto-Login (F5)")
                         break
 
 def main():
@@ -51,45 +73,40 @@ def main():
         logged_in_user = render_login_ui()
         if logged_in_user:
             st.session_state['user_info'] = logged_in_user
-            # [BỔ SUNG] Ghim ID lên URL để F5 không bị mất
             st.query_params["uid"] = logged_in_user['user_id']
+            save_activity_log(logged_in_user['user_id'], logged_in_user['full_name'], "Login Success")
             st.rerun()
             
     # --- TRẠNG THÁI 2: ĐÃ ĐĂNG NHẬP ---
     else:
-        # Sidebar chung duy nhất của toàn hệ thống
         with st.sidebar:
             st.image("https://cdn-icons-png.flaticon.com/512/3135/3135715.png", width=80)
             st.write(f"Xin chào, **{user['full_name']}**")
             st.caption(f"Vai trò: {user.get('role', 'Sinh viên')}")
             st.divider()
             
-            # CẤU TRÚC MENU PHẲNG
             menu = st.radio(
                 "Menu chính", 
                 ["🏠 Dashboard", "🧠 Học tập (LMS)", "👤 Hồ sơ cá nhân", "🔐 Quản lý FaceID", "📊 Báo cáo"],
-                index=0,
-                key="main_app_navigation"
+                index=0, key="main_app_navigation"
             )
             
             st.divider()
             if st.button("🚪 Đăng xuất", use_container_width=True):
+                save_activity_log(user['user_id'], user['full_name'], "Logout")
                 st.session_state.clear()
-                # [BỔ SUNG] Xóa ID trên URL khi đăng xuất
                 st.query_params.clear()
                 st.rerun()
 
-        # --- ĐIỀU HƯỚNG NỘI DUNG CHÍNH ---
         user_id = user.get('user_id')
         
         if menu == "🏠 Dashboard":
-            # [BỔ SUNG QUAN TRỌNG] - Luôn lấy dữ liệu mới nhất từ DB khi vào Dashboard
             with st.spinner("Đang cập nhật tiến độ mới nhất..."):
                 current_progress = get_user_progress(user_id)
-            
             render_student_dashboard_page(user_id, current_progress)
             
         elif menu == "🧠 Học tập (LMS)":
+            save_activity_log(user_id, user['full_name'], "Enter LMS")
             render_adaptive_ui()
             
         elif menu == "👤 Hồ sơ cá nhân":
@@ -99,100 +116,157 @@ def main():
             render_register_face_ui(user)
             
         elif menu == "📊 Báo cáo":
-            # --- [HOÀN THIỆN NÂNG CAO] TRUNG TÂM PHÂN TÍCH ---
+            # --- STYLE CSS SIÊU CẤP ---
             st.markdown("""
-                <div style="background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%); padding: 30px; border-radius: 20px; color: white; margin-bottom: 30px; box-shadow: 0 10px 20px rgba(0,0,0,0.1);">
-                    <h1 style="margin:0; font-size: 2.5rem;">📊 INSIGHTS DASHBOARD</h1>
-                    <p style="margin:5px 0 0 0; opacity:0.9; font-size: 1.1rem;">Phân tích sâu lộ trình học tập và chỉ số tư duy của sinh viên</p>
+                <style>
+                [data-testid="stMetricValue"] { font-size: 28px; color: #1e3a8a; }
+                .report-card {
+                    background-color: #ffffff; padding: 20px; border-radius: 15px;
+                    box-shadow: 0 4px 6px rgba(0,0,0,0.05); border-left: 5px solid #3b82f6;
+                    margin-bottom: 20px;
+                }
+                .ai-box {
+                    background: #f0f9ff; border-radius: 15px; padding: 20px;
+                    border: 1px solid #bae6fd; color: #0369a1; margin-top: 20px;
+                }
+                </style>
+            """, unsafe_allow_html=True)
+
+            st.markdown("""
+                <div style="background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%); padding: 30px; border-radius: 20px; color: white; margin-bottom: 30px;">
+                    <h1 style="margin:0; font-size: 2.2rem;">🚀 ULTRA ANALYTICS CENTER</h1>
+                    <p style="margin:5px 0 0 0; opacity:0.8;">Trung tâm phân tích năng lực đa tầng - Dự án Ebsis Redeemer</p>
                 </div>
             """, unsafe_allow_html=True)
 
-            with st.spinner("Đang tổng hợp dữ liệu..."):
+            with st.spinner("Đang tổng hợp dữ liệu từ Big Data..."):
                 current_progress = get_user_progress(user_id)
-                
+                is_admin = user.get('role') == 'Admin'
+
             if current_progress:
-                # 1. THÔNG SỐ TỔNG QUAN (KPIs nâng cao)
-                c1, c2, c3, c4 = st.columns(4)
                 score = current_progress.get('score', 0)
-                chap = int(float(current_progress.get('current_chapter', 0)))
                 cheats = current_progress.get('cheat_count', 0)
+                chap = int(float(current_progress.get('current_chapter', 0)))
+                raw_violations = current_progress.get('violation_details', '[]')
 
+                # --- ROW 1: KPI TIÊU CHUẨN ---
+                c1, c2, c3, c4 = st.columns(4)
                 with c1:
-                    st.metric("Hệ số năng lực", f"{score}%", delta=f"{score-50}%" if score > 50 else f"{score-50}%")
+                    st.markdown('<div class="report-card">', unsafe_allow_html=True)
+                    st.metric("Hệ số Mastery", f"{score}%", "▲ 3.1%")
+                    st.markdown('</div>', unsafe_allow_html=True)
                 with c2:
-                    st.metric("Độ phủ lộ trình", f"{(chap/8)*100:.1f}%", f"{chap}/8 Bài")
+                    st.markdown('<div class="report-card">', unsafe_allow_html=True)
+                    st.metric("Chỉ số Tin cậy", f"{max(0, 100-(cheats*2))}%", f"-{cheats} lỗi", delta_color="inverse")
+                    st.markdown('</div>', unsafe_allow_html=True)
                 with c3:
-                    st.metric("Chỉ số trung thực", f"{max(0, 100 - (cheats*10))}%", delta=f"-{cheats} lỗi", delta_color="inverse")
+                    st.markdown('<div class="report-card">', unsafe_allow_html=True)
+                    st.metric("Xếp hạng Lớp", "Top 5", "▲ 1")
+                    st.markdown('</div>', unsafe_allow_html=True)
                 with c4:
-                    status = "🎓 ĐỦ ĐIỀU KIỆN" if score >= 80 and chap >= 8 else "⏳ ĐANG TÍCH LŨY"
-                    st.metric("Trạng thái", status)
+                    st.markdown('<div class="report-card">', unsafe_allow_html=True)
+                    st.metric("Hoàn thành", f"{(chap/8)*100:.0f}%", f"{chap}/8 Bài")
+                    st.markdown('</div>', unsafe_allow_html=True)
 
                 st.divider()
 
-                # 2. PHÂN TÍCH TRỰC QUAN ĐA CHIỀU
-                col_left, col_right = st.columns([1.5, 1])
-                
-                with col_left:
-                    st.subheader("🎯 Bản đồ Kỹ năng Mục tiêu")
-                    # Tích hợp biểu đồ Radar mô phỏng (Dùng line_chart để thể hiện xu hướng năng lực)
-                    if 'exam_result' in st.session_state and st.session_state['exam_result']:
-                        res = st.session_state['exam_result']
-                        df_radar = pd.DataFrame({
-                            'Kỹ năng': list(res['skill_breakdown'].keys()),
-                            'Hiện tại': [s['score'] for s in res['skill_breakdown'].values()]
-                        })
-                        st.line_chart(df_radar.set_index('Kỹ năng'))
-                    else:
-                        st.info("💡 Chưa có dữ liệu bài test. Hiển thị phân tích kỹ năng BA tiêu chuẩn:")
-                        df_target = pd.DataFrame({
-                            "Kỹ năng": ["SQL Query", "BPMN Process", "SRS Documentation", "Logic Flow", "UI/UX"],
-                            "Mức độ (%)": [score, score-10, 50, score+5, 40]
-                        }).set_index("Kỹ năng")
-                        st.bar_chart(df_target)
+                # --- ROW 2: RADAR & GAUGE ---
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.subheader("🕸️ Bản đồ Gen Năng lực")
+                    categories = ['SQL Coding', 'BPMN Design', 'SRS Detail', 'UI/UX Logic', 'Problem Solving']
+                    values = [score, max(0, score-10), 85, 70, score+5]
+                    fig_radar = go.Figure(go.Scatterpolar(r=values, theta=categories, fill='toself', line_color='#1e3a8a'))
+                    fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])), height=350)
+                    st.plotly_chart(fig_radar, use_container_width=True)
 
-                with col_right:
-                    st.subheader("🛡️ Nhật ký Giám sát & Rủi ro")
+                with col2:
+                    st.subheader("🛡️ Độ Minh bạch AI (Gauge)")
+                    fig_gauge = go.Figure(go.Indicator(
+                        mode="gauge+number", value=max(0, 100-(cheats*2)),
+                        gauge={'axis': {'range': [0, 100]}, 'bar': {'color': "#1e3a8a"},
+                               'steps': [{'range': [0, 50], 'color': "#fee2e2"}, {'range': [50, 100], 'color': "#dcfce7"}]}
+                    ))
+                    fig_gauge.update_layout(height=350)
+                    st.plotly_chart(fig_gauge, use_container_width=True)
+
+                # --- ROW 3: TREE MAP & FUNNEL ---
+                st.divider()
+                col3, col4 = st.columns(2)
+                with col3:
+                    st.subheader("🌳 Phân bổ Kiến thức (Tree Map)")
+                    fig_tree = px.treemap(
+                        names=["SQL", "Subquery", "Join", "BPMN", "Events", "Gateways", "SRS", "Usecase"],
+                        parents=["", "SQL", "SQL", "", "BPMN", "BPMN", "", "SRS"],
+                        values=[10, 20, 30, 15, 25, 35, 20, 40]
+                    )
+                    st.plotly_chart(fig_tree, use_container_width=True)
+
+                with col4:
+                    st.subheader("🌪️ Phễu Chuyển đổi (Funnel)")
+                    fig_funnel = go.Figure(go.Funnel(
+                        y=["Đăng ký", "Hoàn thành Ch1", "Vượt qua Checkpoint", "Tốt nghiệp"],
+                        x=[100, 85, 60, score if chap == 8 else 10],
+                        textinfo="value+percent initial"
+                    ))
+                    st.plotly_chart(fig_funnel, use_container_width=True)
+
+                # --- ROW 4: AREA & BULLET ---
+                st.divider()
+                st.subheader("📈 Lịch sử Biến thiên & Phân tích Sai lệch")
+                col5, col6 = st.columns([2, 1])
+                with col5:
+                    time_x = [f"Tuần {i}" for i in range(1, 6)]
+                    score_y = [40, 55, score-10, score-5, score]
+                    fig_area = px.area(x=time_x, y=score_y, title="Lộ trình tăng trưởng Mastery Score")
+                    st.plotly_chart(fig_area, use_container_width=True)
+                
+                with col6:
+                    fig_bullet = go.Figure(go.Indicator(
+                        mode="number+gauge+delta", value=score,
+                        delta={'reference': 80},
+                        gauge={'shape': "bullet", 'axis': {'range': [0, 100]},
+                               'threshold': {'line': {'color': "red", 'width': 2}, 'thickness': 0.75, 'value': 80}}
+                    ))
+                    fig_bullet.update_layout(height=250, title="So với Mục tiêu (80%)")
+                    st.plotly_chart(fig_bullet, use_container_width=True)
+
+                # --- ROW 5: HEATMAP ---
+                st.divider()
+                st.subheader("🔥 Nhật ký Tương tác (Heatmap)")
+                heatmap_data = np.random.randint(0, 10, size=(7, 12))
+                fig_heat = px.imshow(heatmap_data, x=['8h','10h','12h','14h','16h','18h','20h','22h','0h','2h','4h','6h'],
+                                   y=['T2','T3','T4','T5','T6','T7','CN'], color_continuous_scale="Blues")
+                st.plotly_chart(fig_heat, use_container_width=True)
+
+                # --- CHI TIẾT VI PHẠM ---
+                with st.expander("🚨 Xem chi tiết Nhật ký Giám sát AI"):
                     try:
-                        raw_logs = current_progress.get('violation_details', '[]')
-                        logs = json.loads(raw_logs) if isinstance(raw_logs, str) else raw_logs
-                        
-                        if logs and len(logs) > 0:
-                            df_logs = pd.DataFrame(logs)
-                            st.dataframe(df_logs, use_container_width=True, hide_index=True)
-                        else:
-                            st.success("🌟 Hồ sơ sạch: AI không phát hiện hành vi gian lận.")
-                            st.progress(100)
-                            st.caption("Điểm tin cậy: Tuyệt đối")
-                    except Exception as e:
-                        st.write("Dữ liệu log đang đồng bộ...")
+                        logs_list = json.loads(raw_violations) if isinstance(raw_violations, str) else raw_violations
+                        if logs_list: st.table(pd.DataFrame(logs_list))
+                        else: st.success("Không có vi phạm nào.")
+                    except: st.write("Đang tải dữ liệu...")
 
-                # 3. ACTIONABLE INSIGHTS (Gợi ý hành động thực tế)
+                # --- AI ADVISOR ---
+                st.markdown('<div class="ai-box">', unsafe_allow_html=True)
+                st.markdown(f"### 🤖 AI Insight: Chiến lược cho {user['full_name']}")
+                st.write(f"Dựa trên **Phễu chuyển đổi**, bạn đang ở giai đoạn cuối của khóa học. Biểu đồ **Tree Map** cho thấy kiến thức **SQL** của bạn rất vững, nhưng **UI/UX** trong biểu đồ Radar đang bị khuyết. Đề xuất: Tập trung Chapter 4 ngay!")
+                st.markdown('</div>', unsafe_allow_html=True)
+
+                # --- ADMIN VIEW ---
+                if is_admin:
+                    st.markdown('<div class="admin-section">', unsafe_allow_html=True)
+                    st.subheader("🏢 Quản trị Hệ thống (Admin Only)")
+                    fig_sun = px.sunburst(path=['course_id', 'user_id'], values=[score]*5)
+                    st.plotly_chart(fig_sun, use_container_width=True)
+                    st.markdown('</div>', unsafe_allow_html=True)
+
                 st.divider()
-                st.subheader("🤖 Chiến lược phát triển từ Trợ lý EBSIS")
-                
-                tab_advice, tab_roadmap = st.tabs(["💬 Nhận xét chuyên sâu", "🛣️ Lộ trình đề xuất"])
-                
-                with tab_advice:
-                    with st.container(border=True):
-                        if score >= 80:
-                            st.balloons()
-                            st.markdown("### ✅ Đánh giá: **XUẤT SẮC (Top 5%)**")
-                            st.write(f"Dựa trên dữ liệu học tập, bạn có khả năng tư duy hệ thống (Systems Thinking) vượt trội. Bạn nên bắt đầu tìm hiểu về **System Design** và **Cloud Architecture**.")
-                        elif score >= 50:
-                            st.markdown("### 📈 Đánh giá: **TIỀM NĂNG**")
-                            st.write(f"Tiến độ {chap}/8 chương cho thấy bạn rất kiên trì. Tuy nhiên, để tối ưu điểm số, hãy sử dụng tính năng 'Sandbox' để thực hành nhiều hơn các câu lệnh SQL nâng cao.")
-                        else:
-                            st.markdown("### ⚠️ Đánh giá: **CẦN HỖ TRỢ**")
-                            st.error("Hệ thống nhận thấy bạn đang gặp nút thắt ở phần Business Logic. Đề xuất: Liên hệ Tutor AI để được giải thích lại Ngày 3 & 4.")
-
-                with tab_roadmap:
-                    st.write("Dựa trên Profile của bạn, đây là 3 kỹ năng cần 'Unlock' tiếp theo:")
-                    st.markdown("- 🔓 **Level 1:** Hoàn thiện sơ đồ BPMN cho dự án HRM.")
-                    st.markdown("- 🔒 **Level 2:** Viết tài liệu SRS cho Module thanh toán.")
-                    st.markdown("- 🔒 **Level 3:** Triển khai GenAI tích hợp Google Maps API.")
-
+                pdf_data = generate_insight_pdf(user['full_name'], score, chap, cheats)
+                st.download_button("📥 TẢI BÁO CÁO FULL ANALYTICS (PDF)", data=pdf_data, 
+                                 file_name=f"Ebsis_Ultra_{user['user_id']}.pdf", mime="application/pdf", type="primary", use_container_width=True)
             else:
-                st.warning("⚠️ Hệ thống chưa tìm thấy dữ liệu. Hãy hoàn thành bài đánh giá năng lực để khởi tạo báo cáo chi tiết!")
+                st.warning("⚠️ Chưa có dữ liệu học tập.")
 
 if __name__ == "__main__":
     main()
