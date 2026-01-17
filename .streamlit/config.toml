@@ -1,3 +1,17 @@
+[server]
+# Tăng tốc độ phản hồi bằng cách nén dữ liệu truyền đi
+enableCORS = false
+enableXsrfProtection = false
+maxUploadSize = 10
+
+[theme]
+# Giảm tải đồ họa bằng cách sử dụng font hệ thống thay vì load từ Google Fonts
+font = "sans serif"
+
+[client]
+# Tắt tính năng kiểm tra cập nhật liên tục để giảm độ trễ
+showErrorDetails = false
+
 [theme]
 primaryColor = "#2563EB"   # Xanh dương đậm (Main Button)
 backgroundColor = "#F8FAFC" # Xám rất nhạt (Nền App cho đỡ mỏi mắt)

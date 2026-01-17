@@ -1,0 +1,17 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Data / generated files
+*.json
+*.npy
+
+# Optional: OS / editor
+.DS_Store
+.vscode/
+.idea/

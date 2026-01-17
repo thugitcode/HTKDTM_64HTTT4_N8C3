@@ -110,7 +110,7 @@ def assign_personalized_course(user_answers, df_questions, df_courses):
     }
 
 # ==========================================
-# 4. LƯU TIẾN ĐỘ (SUPER ROBUST VERSION)
+# 4. LƯU TIẾN ĐỘ (CẢI TIẾN: GHÉP CODE ĐỒNG BỘ)
 # ==========================================
 def save_learning_progress(user_id, course_id, score=None, cheat_count=None, current_chapter=None, violation_log=None):
     client = get_connection()
@@ -121,11 +121,14 @@ def save_learning_progress(user_id, course_id, score=None, cheat_count=None, cur
         all_data = sheet.get_all_records()
         df = pd.DataFrame(all_data)
         
+        # [BỔ SUNG] Ép kiểu string để tìm kiếm chính xác ID
+        user_id_str = str(user_id)
+        
         # Tìm dòng của User
-        match = df[(df['user_id'] == str(user_id)) & (df['course_id'] == str(course_id))]
+        match = df[df['user_id'].astype(str) == user_id_str]
         
         if not match.empty:
-            row_idx = match.index[0] + 2 # +2 vì index bắt đầu từ 0 và có header
+            row_idx = match.index[0] + 2 
             
             # --- BƯỚC 1: LẤY LOG CŨ ---
             try:
@@ -136,30 +139,28 @@ def save_learning_progress(user_id, course_id, score=None, cheat_count=None, cur
 
             # --- BƯỚC 2: GỘP LOG MỚI VÀO ---
             if violation_log:
-                # Chỉ thêm nếu log mới là một danh sách
-                if isinstance(violation_log, list):
-                    updated_logs = old_logs + violation_log
-                else:
-                    updated_logs = old_logs + [violation_log]
-                
-                # Chuyển thành JSON string để lưu, dùng ensure_ascii=False để không lỗi tiếng Việt
+                updated_logs = old_logs + (violation_log if isinstance(violation_log, list) else [violation_log])
                 log_json = json.dumps(updated_logs, ensure_ascii=False)
-                sheet.update_cell(row_idx, 7, log_json) # Cột 7 là violation_details
+                sheet.update_cell(row_idx, 7, log_json) 
 
             # --- BƯỚC 3: CẬP NHẬT CÁC THÔNG TIN KHÁC ---
-            if score is not None: sheet.update_cell(row_idx, 3, score)
+            if score is not None: 
+                sheet.update_cell(row_idx, 3, make_serializable(score))
             
-            # Cheat count cũng nên cộng dồn thay vì ghi đè
-            if cheat_count is not None and cheat_count > 0:
+            if cheat_count is not None:
                 old_cheat = int(match.iloc[0]['cheat_count'] or 0)
                 sheet.update_cell(row_idx, 4, old_cheat + cheat_count)
             
-            if current_chapter is not None: sheet.update_cell(row_idx, 5, current_chapter)
+            # [CỐT LÕI] Ghi số chương hiện tại vào Cột 5
+            if current_chapter is not None: 
+                sheet.update_cell(row_idx, 5, int(current_chapter))
             
+            # Cập nhật thời gian và course_id nếu có thay đổi
             sheet.update_cell(row_idx, 6, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            if course_id: sheet.update_cell(row_idx, 2, str(course_id))
             
         else:
-            # Nếu chưa có bản ghi thì tạo mới hoàn toàn
+            # Tạo mới nếu chưa có
             log_json = json.dumps(violation_log if violation_log else [], ensure_ascii=False)
             new_row = [str(user_id), str(course_id), score or 0, cheat_count or 0, current_chapter or 0, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), log_json]
             sheet.append_row(new_row)
@@ -170,7 +171,7 @@ def save_learning_progress(user_id, course_id, score=None, cheat_count=None, cur
         return False
     
 # ==========================================
-# 5. TẢI TIẾN ĐỘ
+# 5. TẢI TIẾN ĐỘ (CẢI TIẾN: FIX LỖI 0%)
 # ==========================================
 def get_user_progress(user_id):
     client = get_connection()
@@ -178,61 +179,53 @@ def get_user_progress(user_id):
     try:
         sheet = client.open("Ebsis_DB").worksheet("PROGRESS")
         records = sheet.get_all_records()
+        user_id_str = str(user_id)
+        
         for r in records:
-            if str(r['user_id']) == str(user_id):
+            # [FIX QUAN TRỌNG] Ép kiểu string khi so sánh để tránh lỗi ID số/chuỗi
+            if str(r.get('user_id')) == user_id_str:
                 return {
-                    'course_id': r.get('course_id'),
-                    'current_chapter': r.get('current_chapter', 0),
-                    'score': r.get('score', 0),
-                    'cheat_count': r.get('cheat_count', 0),
+                    'course_id': str(r.get('course_id', '')),
+                    # Ép kiểu float rồi mới sang int để tránh lỗi chuỗi "3.0"
+                    'current_chapter': int(float(r.get('current_chapter', 0))),
+                    'score': int(float(r.get('score', 0))),
+                    'cheat_count': int(float(r.get('cheat_count', 0))),
                     'violation_details': r.get('violation_details', '[]')
                 }
         return None
-    except: return None
+    except Exception as e:
+        print(f"Lỗi get_user_progress: {e}")
+        return None
 
 # ==========================================
 # 6. LẤY NỘI DUNG KHÓA HỌC
 # ==========================================
 def get_course_content(course_id):
     _, df_c = load_data()
-    row = df_c[df_c['course_id'] == course_id]
+    if df_c.empty: return None
+    # So sánh ID dạng chuỗi
+    row = df_c[df_c['course_id'].astype(str) == str(course_id)]
     if not row.empty:
         try: return json.loads(row.iloc[0]['data_json'])
         except: return None
     return None
 
 # ========================================================
-# 7. [HOÀN THIỆN] CẬP NHẬT THÔNG TIN HỒ SƠ
+# 7. CẬP NHẬT THÔNG TIN HỒ SƠ (GIỮ NGUYÊN LUỒNG CŨ)
 # ========================================================
 def update_user_profile_db(user_id, new_name, new_major, new_email=None):
-    """
-    Cập nhật thông tin sinh viên vào Google Sheets (Sheet USERS)
-    Cấu trúc mong muốn: 
-    Cột 2: full_name, Cột 6: email, Cột 7: major
-    """
     client = get_connection()
-    if not client: 
-        return False
-        
+    if not client: return False
     try:
         sheet = client.open("Ebsis_DB").worksheet("USERS")
         cell = sheet.find(str(user_id))
-        
         if cell:
-            # 1. Cập nhật Họ tên (Cột 2)
             sheet.update_cell(cell.row, 2, make_serializable(new_name))
-            
-            # 2. Cập nhật Email (Cột 6 - Bạn cần thêm tiêu đề 'email' vào cột F trên Sheets)
             if new_email:
                 sheet.update_cell(cell.row, 6, make_serializable(new_email))
-            
-            # 3. Cập nhật Chuyên ngành (Cột 7 - Bạn cần thêm tiêu đề 'major' vào cột G trên Sheets)
             sheet.update_cell(cell.row, 7, make_serializable(new_major))
-            
             return True
-        else:
-            return False
-            
+        return False
     except Exception as e:
         print(f"Lỗi cập nhật hồ sơ: {e}")
         return False

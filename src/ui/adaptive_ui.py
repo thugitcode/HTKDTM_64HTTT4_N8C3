@@ -4,9 +4,12 @@ import cv2
 import numpy as np
 import av
 import pandas as pd
+import json
 from datetime import datetime
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, WebRtcMode
 from src.ui.student_dashboard import render_student_dashboard_page, render_student_profile_page
+from src.core.m3_registration import handle_next_course_registration
+from src.services.email_service import send_graduation_email
 
 # Import Core Logic
 from src.core.m2_adaptive import (
@@ -83,7 +86,7 @@ def _calculate_total_learning_time(logs):
 # --- GIAO DIỆN LỄ TỐT NGHIỆP ---
 def _render_graduation_ceremony(user_info, course, final_score):
     st.balloons()
-    # Giao diện chứng chỉ vàng kim
+    # 1. Giao diện chứng chỉ vàng kim
     st.markdown(f"""
     <div style="border: 15px double #D4AF37; padding: 40px; text-align: center; background-color: #fdfdfd; border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,0.1);">
         <div style="color: #D4AF37; font-size: 50px; margin-bottom: 10px;">🏆</div>
@@ -96,28 +99,55 @@ def _render_graduation_ceremony(user_info, course, final_score):
     """, unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
+
+    # --- PHẦN MỚI: NÚT GỬI EMAIL CHỨNG CHỈ ---
+    col_mail, col_space = st.columns([1, 1])
+    with col_mail:
+        user_email = user_info.get('email', '') # Lấy email từ DB
+        if st.button("📧 Nhận Chứng Chỉ Qua Email", use_container_width=True):
+            if user_email and "@" in user_email:
+                with st.spinner("Đang khởi tạo PDF và gửi email..."):
+                    success, msg = send_graduation_email(
+                        user_email, 
+                        user_info['full_name'], 
+                        course['title'], 
+                        final_score
+                    )
+                    if success:
+                        st.success("📩 Đã gửi! Kiểm tra hòm thư của bạn nhé.")
+                    else:
+                        st.error(f"Lỗi gửi mail: {msg}")
+            else:
+                st.error("Lỗi: Tài khoản của bạn chưa cập nhật Email trong hệ thống!")
     
-    # Logic gợi ý lộ trình tiếp theo
-    skill_map = {
-        "Coding": "Database", "Database": "Coding", 
-        "Network": "Agile", "Agile": "Coding"
-    }
+    st.divider()
+    
+    # 2. Logic gợi ý lộ trình tiếp theo
+    skill_map = {"Coding": "Database", "Database": "Coding", "Network": "Agile", "Agile": "Coding"}
     next_skill = skill_map.get(course.get('skill_tag'), "Coding")
     st.info(f"🚀 **Bước tiếp theo:** Dựa trên kỹ năng vừa đạt được, bạn nên học tiếp môn **{next_skill}**")
     
+    # 3. Nút đăng ký môn mới
     if st.button(f"🎯 Đăng ký học môn {next_skill}", type="primary", use_container_width=True):
-        st.session_state['my_course'] = None
-        st.session_state['force_retake'] = True
-        st.rerun()
-
-def render_adaptive_ui():
-    """
-    Hàm điều hướng nội dung LMS. 
-    Lưu ý: Sidebar đã được quản lý tại main.py nên ở đây chỉ tập trung vào nội dung chính.
-    """
+        with st.spinner("Đang chuẩn bị lộ trình học tập mới..."):
+            success, msg = handle_next_course_registration(user_info['user_id'], course['course_id'])
+            
+            if success:
+                st.toast(msg, icon="🎓")
+                # Xóa sạch cache cũ để hệ thống nhận diện dòng mới nhất trong Sheets
+                st.session_state['my_course'] = None
+                st.session_state['cur_chapter_idx'] = 0
+                st.session_state['exam_result'] = None
+                st.session_state['force_retake'] = False 
+                
+                time.sleep(1.5)
+                st.rerun() 
+            else:
+                st.error(msg)
+def render_adaptive_ui(progress=None):
     load_custom_css()
     
-    # 1. Khởi tạo & Đồng bộ Session State (Giữ nguyên logic gốc của bạn)
+    # 1. Khởi tạo & Đồng bộ Session State
     if 'my_course' not in st.session_state: st.session_state['my_course'] = None
     if 'cur_chapter_idx' not in st.session_state: st.session_state['cur_chapter_idx'] = 0
     if 'exam_result' not in st.session_state: st.session_state['exam_result'] = None
@@ -128,37 +158,52 @@ def render_adaptive_ui():
     user = st.session_state.get('user_info', {})
     user_id = str(user.get('user_id', 'Guest'))
     
-    # 2. AUTO LOAD DỮ LIỆU TỪ DB (Đảm bảo dữ liệu luôn mới nhất)
-    if st.session_state['my_course'] is None and not st.session_state['force_retake']:
-        progress = get_user_progress(user_id)
-        if progress:
+    # 2. [THÊM LOGIC ĐỒNG BỘ] AUTO LOAD DỮ LIỆU TỪ DB 
+    # Khi đăng nhập lại, my_course sẽ là None, logic này sẽ lấy dữ liệu từ DB để khôi phục trạng thái
+    if st.session_state['my_course'] is None and not st.session_state['force_retake'] and st.session_state['exam_result'] is None:
+        if progress is None:
+            progress = get_user_progress(user_id)
+        
+        if progress and progress.get('course_id'):
             course_data = get_course_content(progress['course_id'])
             if course_data:
                 st.session_state['my_course'] = course_data
-                st.session_state['cur_chapter_idx'] = int(progress.get('current_chapter', 0))
+                # Đồng bộ chính xác index bài học từ Database (ép kiểu an toàn)
+                db_idx = int(float(progress.get('current_chapter', 0)))
+                st.session_state['cur_chapter_idx'] = db_idx
                 st.session_state['history_score'] = progress.get('score', 0)
                 st.session_state['history_cheat'] = progress.get('cheat_count', 0)
-                st.session_state['viewing_idx'] = min(int(progress.get('current_chapter', 0)), 7)
+                # Đảm bảo trang hiển thị mặc định là bài đang học dở
+                st.session_state['viewing_idx'] = min(db_idx, len(course_data.get('chapters', [])) - 1)
 
-    # 3. GIAO DIỆN NỘI DUNG (Dùng Tabs thay cho Radio để không bị trùng Menu Cha)
-    # Phân cấp: Sidebar bên trái là Module lớn, Tabs bên phải là thao tác nhỏ
+    # 3. GIAO DIỆN NỘI DUNG (Tabs)
     tab_study, tab_exam = st.tabs(["📖 Vào lớp học", "🩺 Kiểm tra năng lực"])
 
     with tab_study:
         if st.session_state['my_course']:
-            # Nếu đã có khóa học thì vào học trực tiếp
             _render_classroom(user_id)
         else:
             st.info("👋 Chào mừng bạn! Vui lòng qua Tab 'Kiểm tra năng lực' để bắt đầu lộ trình học tập.")
 
+    # --- PHẦN ROUTER LOGIC TRONG TAB_EXAM ---
     with tab_exam:
-        # Logic hiển thị linh hoạt: Đã thi rồi thì hiện lịch sử, chưa thi thì hiện phòng thi
-        if st.session_state['exam_result']:
+        # 1. ƯU TIÊN SỐ 1: Nếu vừa nhấn Nộp bài và có kết quả -> Hiện Báo cáo ngay
+        if st.session_state['exam_result'] is not None:
             _render_analysis_report(user_id)
-        elif st.session_state['my_course']:
+            
+        # 2. ƯU TIÊN SỐ 2: Nếu nhấn nút "Làm lại bài test" -> Hiện phòng thi
+        elif st.session_state['force_retake']:
+            _render_smart_exam_realtime(user_id)
+            
+        # 3. ƯU TIÊN SỐ 3: Nếu đã có khóa học (đã thi từ trước) -> Hiện lịch sử
+        elif st.session_state['my_course'] is not None:
             _render_exam_history(user_id)
+            
+        # 4. ƯU TIÊN SỐ 4: Người mới hoàn toàn -> Hiện phòng thi
         else:
             _render_smart_exam_realtime(user_id)
+
+
 
 # --- [BỔ SUNG] MÀN HÌNH DASHBOARD THEO DÕI ---
 def _render_student_dashboard(user_id):
@@ -200,7 +245,7 @@ def _render_exam_history(user_id):
     c1, c2, c3 = st.columns(3)
     c1.metric("Điểm số cũ", f"{score}/100")
     c2.metric("Số vi phạm cũ", f"{cheat} lần", delta_color="inverse")
-    count = st.info(f"Khóa học: **{course['title']}**")
+    st.info(f"Khóa học: **{course['title']}**")
     
     st.markdown("---")
     
@@ -235,9 +280,21 @@ def _render_smart_exam_realtime(user_id):
         st.markdown('<div class="st-card">', unsafe_allow_html=True)
         st.markdown("**🔴 CAMERA GIÁM SÁT**")
         if AI_AVAILABLE:
-            webrtc_ctx = webrtc_streamer(key="proctoring", mode=WebRtcMode.SENDRECV, video_processor_factory=VideoProcessor, media_stream_constraints={"video": True, "audio": False}, async_processing=True)
+            webrtc_ctx = webrtc_streamer(
+                key="proctoring", 
+                mode=WebRtcMode.SENDRECV, 
+                video_processor_factory=VideoProcessor, 
+                media_stream_constraints={"video": True, "audio": False}, 
+                async_processing=True
+            )
         else:
             st.error("⚠️ Lỗi AI.")
+        
+        # Cảnh báo nhanh cho người dùng nếu AI phát hiện lỗi ngay lập tức
+        if webrtc_ctx and webrtc_ctx.video_transformer:
+            if webrtc_ctx.video_transformer.violation_count > 0:
+                st.toast(f"⚠️ Cảnh báo: AI phát hiện {webrtc_ctx.video_transformer.violation_count} hành vi lạ!", icon="❌")
+        
         st.markdown('</div>', unsafe_allow_html=True)
 
     is_camera_on = webrtc_ctx and webrtc_ctx.state.playing
@@ -269,10 +326,15 @@ def _render_smart_exam_realtime(user_id):
                     analysis_result = assign_personalized_course(answers, diag_q, df_c)
                     course = analysis_result['recommended_course']
                     
+                    if analysis_result['total_score'] >= 80: st.balloons()
+
                     with st.spinner("Đang lưu kết quả..."):
                         save_learning_progress(user_id, course['course_id'], analysis_result['total_score'], cheat_count, 0, violation_log=cheat_log)
                         st.session_state['exam_result'] = analysis_result
                         st.session_state['my_course'] = course 
+                        st.session_state['current_cheat_count'] = cheat_count
+                        st.session_state['current_cheat_log'] = cheat_log
+                        st.session_state['force_retake'] = False
                         st.rerun()
 
 # --- BÀI THI CHECKPOINT (CUỐI KHÓA) ---
@@ -289,70 +351,81 @@ def _render_checkpoint_quiz(user_id, course, skill_tag):
         user_ans = {}
         for i, q in enumerate(pool):
             st.write(f"**Câu {i+1}: {q['question_text']}**")
-            user_ans[q['id']] = st.radio("Chọn đáp án:", [q['option_a'], q['option_b'], q['option_c'], q['option_d']], key=f"ch_{q['id']}")
+            user_ans[q['id']] = st.radio("Chọn đáp án:", [q['option_a'], q['option_b'], q['option_c'], q['option_d']], key=f"cp_{q['id']}")
         
-        if st.form_submit_button("NỘP BÀI VÀ KẾT THÚC"):
-            correct = 0
-            for q in pool:
-                mapping = {"A": q['option_a'], "B": q['option_b'], "C": q['option_c'], "D": q['option_d']}
-                if user_ans[q['id']] == mapping[q['correct_opt']]:
-                    correct += 1
-            final_percent = int((correct / len(pool)) * 100)
-            
-            # CỘNG DỒN LOG KẾT QUẢ THI
-            checkpoint_log = [{"Thời gian": datetime.now().strftime("%H:%M:%S"), "Sự kiện": f"Hoàn thành Checkpoint: {final_percent}%"}]
-            
-            with st.spinner("Đang ghi nhận kết quả tốt nghiệp..."):
-                save_learning_progress(user_id, course['course_id'], final_percent, 0, 8, violation_log=checkpoint_log)
-            
-            st.session_state['history_score'] = final_percent
-            st.session_state['cur_chapter_idx'] = 8
-            # FIX LỖI INDEX TẠI ĐÂY
-            st.session_state['viewing_idx'] = len(course.get('chapters', [])) - 1
-            
-            if final_percent >= 80:
-                st.success(f"🎉 Tuyệt vời! Bạn đạt {final_percent}%. Bạn đã tốt nghiệp khóa học!"); st.balloons()
-                time.sleep(1)
-            else:
-                st.error(f"⚠️ Kết quả: {final_percent}%. Bạn cần 80% để qua môn. Hãy ôn tập lại!")
-            st.rerun()
+        submit_button = st.form_submit_button("NỘP BÀI VÀ KẾT THÚC", type="primary")
+
+    if submit_button:
+        correct = 0
+        for q in pool:
+            mapping = {"A": q['option_a'], "B": q['option_b'], "C": q['option_c'], "D": q['option_d']}
+            if user_ans[q['id']] == mapping[q['correct_opt']]:
+                correct += 1
+        final_percent = int((correct / len(pool)) * 100)
+        
+        # CỘNG DỒN LOG KẾT QUẢ THI
+        checkpoint_log = [{"Thời gian": datetime.now().strftime("%H:%M:%S"), "Sự kiện": f"Hoàn thành Checkpoint: {final_percent}%"}]
+        
+        with st.spinner("Đang ghi nhận kết quả tốt nghiệp..."):
+            save_learning_progress(user_id, course['course_id'], final_percent, 0, 8, violation_log=checkpoint_log)
+        
+        st.session_state['history_score'] = final_percent
+        st.session_state['cur_chapter_idx'] = 8
+        st.session_state['viewing_idx'] = len(course.get('chapters', [])) - 1
+        
+        if final_percent >= 80:
+            st.success(f"🎉 Tuyệt vời! Bạn đạt {final_percent}%. Bạn đã tốt nghiệp khóa học!"); st.balloons()
+            time.sleep(2)
+        else:
+            st.error(f"⚠️ Kết quả: {final_percent}%. Bạn cần 80% để qua môn. Hãy ôn tập lại!")
+            time.sleep(2)
+        st.rerun()
 
 # --- REPORT CHI TIẾT ---
 def _render_analysis_report(user_id):
     result = st.session_state['exam_result']
     course = result['recommended_course']
+    
+    # Lấy dữ liệu vi phạm trực tiếp từ Session State đã được gán ở hàm nộp bài
     cheat_count = st.session_state.get('current_cheat_count', 0)
     cheat_log = st.session_state.get('current_cheat_log', [])
     
     st.markdown(f"""
     <div class="exam-header-container" style="background: linear-gradient(90deg, #4F46E5 0%, #7C3AED 100%);">
         <h2>📊 KẾT QUẢ VỪA THI: {result['total_score']}/100</h2>
-        <p>Dữ liệu đã được lưu vào hồ sơ.</p>
+        <p>Dữ liệu đã được lưu vào hồ sơ học tập của bạn.</p>
     </div>
     """, unsafe_allow_html=True)
     
+    # Hiển thị chính xác vi phạm
     if cheat_count > 0:
-        with st.expander("⚠️ Xem nhật ký vi phạm", expanded=False):
+        st.error(f"⚠️ Hệ thống ghi nhận {cheat_count} hành vi nghi vấn vi phạm quy chế.")
+        with st.expander("🔎 Xem nhật ký giám sát AI", expanded=True):
             st.dataframe(pd.DataFrame(cheat_log), use_container_width=True)
     else:
-        st.success("✅ Không vi phạm quy chế.")
+        st.success("✅ Giám sát AI xác nhận: Không vi phạm quy chế.")
 
     c1, c2 = st.columns([2, 1])
     with c1:
-        st.subheader("Biểu đồ kỹ năng")
-        for skill, stats in result['skill_breakdown'].items():
-            st.progress(stats['score']/100)
-            st.caption(f"{skill}: {stats['score']}%")
+        st.subheader("🎯 Bản đồ năng lực (Radar)")
+        # Tải dữ liệu kỹ năng để vẽ biểu đồ
+        skill_labels = list(result['skill_breakdown'].keys())
+        skill_values = [stats['score'] for stats in result['skill_breakdown'].values()]
+        
+        # Streamlit hỗ trợ Bar Chart mặc định rất tốt cho việc so sánh kỹ năng
+        df_skills = pd.DataFrame({"Kỹ năng": skill_labels, "Mức độ (%)": skill_values})
+        st.bar_chart(df_skills.set_index("Kỹ năng"))
+
     with c2:
         st.info(f"💡 Đề xuất: **{course['title']}**")
-        st.write("Dựa trên kết quả, AI đã gán khóa học này cho bạn.")
+        st.write(f"Lộ trình được thiết kế để cải thiện kỹ năng: **{result['weakest_skill']}**")
 
-    with st.expander("🔎 Xem chi tiết đúng/sai", expanded=False):
+    with st.expander("🔎 Xem chi tiết đúng/sai từng câu", expanded=False):
         for i, item in enumerate(result['details']):
             col_icon, col_text = st.columns([0.1, 0.9])
             with col_icon:
-                if item['is_correct']: st.success("Đ")
-                else: st.error("S")
+                if item['is_correct']: st.write("✅")
+                else: st.write("❌")
             with col_text:
                 st.markdown(f"**Câu {i+1}: {item['question']}**")
                 if not item['is_correct']:
@@ -368,34 +441,41 @@ def _render_analysis_report(user_id):
             st.rerun()
     with col_btn2:
         if st.button("🎓 VÀO HỌC NGAY", type="primary", use_container_width=True):
+            # Ghim khóa học vào session để thoát phòng thi
+            st.session_state['my_course'] = course
             st.session_state['exam_result'] = None
             st.rerun()
 
-# --- LỚP HỌC ---
+# --- LỚP HỌC (Bản hoàn thiện UI) ---
 def _render_classroom(user_id):
     course = st.session_state.get('my_course')
     if not course:
         st.warning("⚠️ Chưa có lộ trình học."); return
 
+    # Header với Gradient
     st.markdown(f"""
-    <div style="background: linear-gradient(90deg, #1E3A8A 0%, #3B82F6 100%); padding: 20px; border-radius: 15px; color: white; margin-bottom: 25px;">
-        <h1 style="margin:0; font-size: 24px;">{course['title']}</h1>
-        <p style="margin:5px 0 0 0; opacity: 0.8;">Lộ trình cá nhân hóa cho BA</p>
+    <div style="background: linear-gradient(90deg, #1E3A8A 0%, #3B82F6 100%); padding: 25px; border-radius: 15px; color: white; margin-bottom: 25px; box-shadow: 0 4px 15px rgba(0,0,0,0.1);">
+        <h1 style="margin:0; font-size: 26px;">📚 {course['title']}</h1>
+        <p style="margin:5px 0 0 0; opacity: 0.9; font-style: italic;">Lộ trình được cá nhân hóa cho BA</p>
     </div>
     """, unsafe_allow_html=True)
 
     max_unlocked_idx = st.session_state.get('cur_chapter_idx', 0)
     chapters = course.get('chapters', [])
+    
+    # Hiển thị tổng phần trăm hoàn thành khóa học
+    progress_percent = min(int((max_unlocked_idx / len(chapters)) * 100), 100)
+    st.write(f"🚀 **Tiến độ tổng thể:** {progress_percent}%")
+    st.progress(progress_percent / 100)
 
     if 'viewing_idx' not in st.session_state:
         st.session_state['viewing_idx'] = max_unlocked_idx
 
-    # --- FIX LỖI INDEX OUT OF RANGE TẠI ĐÂY ---
+    # Fix lỗi index out of range
     if st.session_state['viewing_idx'] >= len(chapters):
         st.session_state['viewing_idx'] = len(chapters) - 1
     
     cur_view_idx = st.session_state['viewing_idx']
-    # ------------------------------------------
 
     col_nav, col_content = st.columns([1, 2.8])
 
@@ -407,7 +487,9 @@ def _render_classroom(user_id):
             
             icon = "🔒" if is_locked else "✅" if is_done else "▶️"
             label = f"Ngày {ch['day']}: {ch['title'][:12]}..."
-            if st.button(f"{icon} {label}", key=f"nav_{idx}", use_container_width=True, disabled=is_locked):
+            # Highlight bài đang chọn
+            if st.button(f"{icon} {label}", key=f"nav_{idx}", use_container_width=True, disabled=is_locked, 
+                         type="primary" if idx == cur_view_idx else "secondary"):
                 st.session_state['viewing_idx'] = idx; st.rerun()
 
     with col_content:
@@ -448,17 +530,21 @@ def _render_classroom(user_id):
                 else:
                     _render_checkpoint_quiz(user_id, course, course['skill_tag'])
             else:
+                # Nút hoàn thành chỉ hiện ở bài học hiện tại (chưa hoàn thành)
                 if cur_view_idx == max_unlocked_idx:
                     st.divider()
                     if st.button("✅ HOÀN THÀNH & MỞ KHÓA TIẾP THEO", type="primary", use_container_width=True):
                         next_idx = cur_view_idx + 1
                         finish_log = [{"Thời gian": datetime.now().strftime("%H:%M:%S"), "Sự kiện": f"Hoàn thành bài học Ngày {active_day['day']}"}]
+                        
                         if next_idx < len(chapters):
                             with st.spinner("Đang đồng bộ tiến độ..."):
                                 save_learning_progress(user_id, course['course_id'], None, 0, next_idx, violation_log=finish_log)
-                            st.session_state['cur_chapter_idx'] = next_idx
-                            st.session_state['viewing_idx'] = next_idx
-                            st.balloons(); st.rerun()
+                                st.session_state['cur_chapter_idx'] = next_idx
+                                st.session_state['viewing_idx'] = next_idx
+                                st.balloons()
+                                time.sleep(1)
+                                st.rerun()
                         else:
                             st.success("🎉 Bạn đã hoàn thành bài học cuối. Hãy thực hiện bài thi tốt nghiệp!")
 
