@@ -1,6 +1,7 @@
 from datetime import datetime
 import smtplib
 import os
+import io
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
@@ -10,8 +11,14 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.units import inch
 
+# ==========================================
+# 1. HÀM TẠO CHỨNG CHỈ PDF (TỐT NGHIỆP)
+# ==========================================
 def create_pdf_certificate(student_name, course_name, score):
-    file_path = f"Certificate_{student_name.replace(' ', '_')}.pdf"
+    # CHIÊU CỨU CÁNH: Ép kiểu student_name về chuỗi để tránh lỗi .replace() với ID số
+    name_str = str(student_name)
+    file_path = f"Certificate_{name_str.replace(' ', '_')}.pdf"
+    
     c = canvas.Canvas(file_path, pagesize=A4)
     width, height = A4
 
@@ -22,12 +29,12 @@ def create_pdf_certificate(student_name, course_name, score):
     c.setLineWidth(2)
     c.rect(30, 30, width-60, height-60) # Viền trong
 
-    # 2. Thêm Logo hoặc Icon trang trí
+    # 2. Watermark EBSIS
     c.setFont("Helvetica-Bold", 60)
     c.setStrokeColor(colors.lightgrey)
-    c.drawCentredString(width/2, height/2 + 100, "EBSIS") # Chữ mờ làm watermark
+    c.drawCentredString(width/2, height/2 + 100, "EBSIS") 
 
-    # 3. Tiêu đề chính
+    # 3. Tiêu đề
     c.setFillColor(colors.darkblue)
     c.setFont("Times-BoldItalic", 45)
     c.drawCentredString(width/2, height - 150, "CERTIFICATE")
@@ -43,7 +50,7 @@ def create_pdf_certificate(student_name, course_name, score):
     # Tên học viên (Làm nổi bật)
     c.setFont("Helvetica-Bold", 35)
     c.setFillColor(colors.darkred)
-    c.drawCentredString(width/2, height - 360, student_name.upper())
+    c.drawCentredString(width/2, height - 360, name_str.upper())
 
     # Chi tiết khóa học
     c.setFillColor(colors.black)
@@ -51,7 +58,7 @@ def create_pdf_certificate(student_name, course_name, score):
     c.drawCentredString(width/2, height - 420, "has successfully mastered the course")
     
     c.setFont("Helvetica-Bold", 22)
-    c.drawCentredString(width/2, height - 460, f"[{course_name.upper()}]")
+    c.drawCentredString(width/2, height - 460, f"[{str(course_name).upper()}]")
 
     # 5. Điểm số và Ngày tháng
     c.setFont("Helvetica", 15)
@@ -60,7 +67,7 @@ def create_pdf_certificate(student_name, course_name, score):
     today = datetime.now().strftime("%B %d, %Y")
     c.drawCentredString(width/2, height - 580, f"Issued on: {today}")
 
-    # 6. Chữ ký giả định cho "xịn"
+    # 6. Chữ ký giả định
     c.setLineWidth(1)
     c.line(width/2 - 100, height - 700, width/2 + 100, height - 700)
     c.setFont("Times-Italic", 12)
@@ -69,48 +76,52 @@ def create_pdf_certificate(student_name, course_name, score):
     c.save()
     return file_path
 
+# ==========================================
+# 2. HÀM GỬI EMAIL TỐT NGHIỆP
+# ==========================================
 def send_graduation_email(receiver_email, student_name, course_name, final_score):
     sender_email = "luuanhthuwannaone@gmail.com"  # Email của Thư
-    password = "svetjdyknbtyuhlg"          # Mã 16 ký tự Thư vừa lấy
+    password = "svetjdyknbtyuhlg"                # App Password
 
-    # 1. Tạo file PDF
+    # Tạo file PDF
     pdf_file = create_pdf_certificate(student_name, course_name, final_score)
 
-    # 2. Cấu hình Email
+    # Cấu hình Email
     msg = MIMEMultipart()
     msg['From'] = sender_email
     msg['To'] = receiver_email
     msg['Subject'] = f"🎓 Chúc mừng {student_name} tốt nghiệp khóa {course_name}!"
 
-    body = f"Chào {student_name},\n\nChúc mừng bạn đã hoàn thành khóa học. Vui lòng xem chứng chỉ đính kèm dưới đây."
+    body = f"Chào {student_name},\n\nChúc mừng bạn đã hoàn thành xuất sắc khóa học {course_name}. Vui lòng xem chứng chỉ đính kèm dưới đây.\n\nTrân trọng,\nEBSIS Academic Team"
     msg.attach(MIMEText(body, 'plain'))
 
-    # 3. Đính kèm file PDF
-    with open(pdf_file, "rb") as attachment:
-        part = MIMEBase("application", "octet-stream")
-        part.set_payload(attachment.read())
-        encoders.encode_base64(part)
-        part.add_header("Content-Disposition", f"attachment; filename= {pdf_file}")
-        msg.attach(part)
-
-    # 4. Gửi Mail
+    # Đính kèm file PDF
     try:
+        with open(pdf_file, "rb") as attachment:
+            part = MIMEBase("application", "octet-stream")
+            part.set_payload(attachment.read())
+            encoders.encode_base64(part)
+            part.add_header("Content-Disposition", f"attachment; filename= {pdf_file}")
+            msg.attach(part)
+
+        # Gửi Mail qua SMTP
         server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
         server.login(sender_email, password)
         server.sendmail(sender_email, receiver_email, msg.as_string())
         server.quit()
-        os.remove(pdf_file) # Xóa file tạm sau khi gửi
+        
+        # Xóa file tạm sau khi gửi
+        if os.path.exists(pdf_file):
+            os.remove(pdf_file)
+            
         return True, "Đã gửi mail kèm chứng chỉ!"
     except Exception as e:
         return False, str(e)
-    
-    from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import A4
-from reportlab.lib import colors
-from datetime import datetime
-import io
 
+# ==========================================
+# 3. HÀM TẠO PDF NHẬN XÉT (INSIGHT REPORT)
+# ==========================================
 def generate_insight_pdf(user_name, score, chap, cheats):
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
@@ -127,7 +138,7 @@ def generate_insight_pdf(user_name, score, chap, cheats):
     
     c.setFillColor(colors.black)
     c.setFont("Helvetica-Bold", 14)
-    c.drawString(50, height - 100, f"Student Name: {user_name}")
+    c.drawString(50, height - 100, f"Student Name: {str(user_name)}")
     c.drawString(50, height - 120, f"Report Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
     # 3. Chỉ số KPI
